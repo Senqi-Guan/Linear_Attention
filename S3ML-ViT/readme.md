@@ -2,7 +2,7 @@
 
 ## Getting Started
 ```bash
-pip install -r requirements.txt
+conda install --yes --file requirements.txt
 ```
 ## Training
 ```bash

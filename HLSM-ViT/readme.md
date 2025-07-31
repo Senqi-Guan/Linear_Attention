@@ -2,7 +2,10 @@
 
 ## Getting Started
 ```bash
-conda install --yes --file requirements.txt
+conda create -n efficientvit python=3.10
+conda activate efficientvit
+conda install -c conda-forge mpi4py openmpi
+pip install -r requirements.txt
 ```
 ## Training
 ```bash

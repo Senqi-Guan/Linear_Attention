@@ -15,5 +15,5 @@ python eval_cls_model.py --model b1-r224 --image_size 224 --weight_url xxx.pt
 ## Model Weights
 ```
 Download pre-trained weights:
-- [Baidu Yun](https://pan.baidu.com/s/15OgLPEPCd_CaDGmp22mcnA?pwd=cbqu)
+- [Baidu Yun](https://pan.baidu.com/s/1-tgQ0Po637VBIV7DiSLE3g?pwd=0523)
 ```

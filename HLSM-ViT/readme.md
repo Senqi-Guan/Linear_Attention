@@ -2,8 +2,8 @@
 
 ## Getting Started
 ```bash
-conda create -n efficientvit python=3.10
-conda activate efficientvit
+conda create -n hlsmvit python=3.10
+conda activate hlsmvit
 conda install -c conda-forge mpi4py openmpi
 pip install -r requirements.txt
 ```

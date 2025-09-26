@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 from torch.cuda.amp import autocast
-
+import numpy as np
 from efficientvit.models.nn.act import build_act
 from efficientvit.models.nn.norm import build_norm
 from efficientvit.models.utils import get_same_padding, list_sum, resize, val2list, val2tuple
@@ -358,7 +358,6 @@ class LiteMLA(nn.Module):
         act_func = val2tuple(act_func, 2)
 
         self.dim = dim
-        # print('头的数量是：', heads,  'dim是：', self.dim, '输入形状是：', in_channels)
         self.qkv = ConvLayer(
             in_channels,
             3 * total_dim,
@@ -393,6 +392,55 @@ class LiteMLA(nn.Module):
             norm=norm[1],
             act_func=act_func[1],
         )
+        self.global_pool = nn.AdaptiveAvgPool2d(1)
+        self.weight_generator = nn.Linear(in_channels*2, 3)
+        self.weight_generator_outuse = nn.Linear(in_channels, 1)
+        self.sigmoid = nn.Sigmoid()
+        self.dwc = nn.Conv2d(in_channels=in_channels*2, out_channels=in_channels*2, kernel_size=5,
+                             groups=in_channels*2, padding=5 // 2)
+        self.scale = nn.Parameter(torch.zeros(size=(1, 1, 1, dim)))
+        self.scale_add = nn.Parameter(torch.ones(1))
+        self.conv3x3 = nn.Sequential(
+            nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1, groups=in_channels),
+            nn.Conv2d(in_channels, in_channels, kernel_size=1)
+        )
+        self.conv5x5 = nn.Sequential(
+            nn.Conv2d(in_channels, in_channels, kernel_size=5, padding=2, groups=in_channels),
+            nn.Conv2d(in_channels, in_channels, kernel_size=1)
+        )
+        self.channel_attention = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(in_channels, in_channels // 16, kernel_size=1),
+            nn.ReLU(),
+            nn.Conv2d(in_channels // 16, in_channels, kernel_size=1),
+            nn.Sigmoid()
+        )
+    def select_important_tokens(self, tensor, topk):
+        """
+        根据均值和标准差选择最重要的token。
+        """
+        mean = tensor.mean(dim=-1)
+        std = tensor.std(dim=-1)
+        importance_score = mean + std
+        
+        _, top_indices = torch.topk(importance_score, topk, dim=2)
+        """
+        根据L2范数选择最重要的token。
+        """
+        # # 计算每个token在最后一个维度上的L2范数
+        # norm_scores = torch.norm(tensor, p=2, dim=-1)
+        
+        # # 选择得分最高的topk个token
+        # _, top_indices = torch.topk(norm_scores, topk, dim=-1)
+        """
+        根据最大激活值选择最重要的token。
+        """
+        # # 计算每个token在最后一个维度上的最大值
+        # activation_scores = tensor.max(dim=-1).values
+    
+        # # 选择得分最高的topk个token
+        # _, top_indices = torch.topk(activation_scores, topk, dim=-1)
+        return top_indices
     @autocast(enabled=False)
     def relu_linear_att(self, qkv: torch.Tensor) -> torch.Tensor:
         # print(qkv.shape)
@@ -416,33 +464,73 @@ class LiteMLA(nn.Module):
             qkv[..., self.dim : 2 * self.dim],
             qkv[..., 2 * self.dim :],
         )
-        
-        ###############################################原始代码
-        # # lightweight linear attention
-         q = self.kernel_func(q)
-         k = self.kernel_func(k)
-
-        # # linear matmul
-         trans_k = k.transpose(-1, -2)
-
-         v = F.pad(v, (0, 1), mode="constant", value=1)
-         kv = torch.matmul(trans_k, v)
-         out = torch.matmul(q, kv)
-         out = out[..., :-1] / (out[..., -1:] + self.eps)
-
-         out = torch.transpose(out, -1, -2)
-         out = torch.reshape(out, (B, -1, H, W))
+        sample_num = q.shape[2]
+        # sample_idx = torch.linspace(0, sample_num-1, steps=int(2 * math.sqrt(sample_num))).long()  # 均匀采样一些点
+        sample_idx = self.select_important_tokens(q, int(2 * math.sqrt(sample_num)))
+        expanded_indices = sample_idx.unsqueeze(-1).expand(-1, -1, -1, q.size(-1))
+        q_sampled = torch.gather(q, 2, expanded_indices)
+        k_sampled = torch.gather(k, 2, expanded_indices)
+        v_sampled = torch.gather(v, 2, expanded_indices)
+        d_k = k_sampled.size(-1)
+        attention_scores = torch.matmul(q_sampled, k_sampled.transpose(-2, -1)) / torch.sqrt(torch.tensor(d_k, dtype=torch.float))
+        attention_weights = F.softmax(attention_scores, dim=-1)
+        top_percentage = 50
+        num_to_keep = int(attention_weights.size(-1) * top_percentage / 100)
+        sorted_weights, _ = attention_weights.sort(dim=-1)
+        threshold_value = sorted_weights[..., -num_to_keep]
+        attention_weights = torch.where(attention_weights >= threshold_value.unsqueeze(-1), attention_weights, torch.zeros_like(attention_weights))
+        sampled_attention = torch.matmul(attention_weights, v_sampled)
+        qk_result_expanded = torch.zeros_like(v)
+        qk_result_expanded.scatter_(2, expanded_indices, sampled_attention)
+        sampled_result = qk_result_expanded.reshape(B, -1, H, W)
+        v1_reshaped = v.reshape(B, -1, H, W)
+        add_featuremap = self.dwc(v1_reshaped)
+        scale = nn.Softplus()(self.scale)
+        q = self.kernel_func(q) + 1e-6
+        k = self.kernel_func(k) + 1e-6
+        q = q / scale
+        k = k / scale
+        # linear matmul
+        q_norm = q.norm(dim=-2, keepdim=True)
+        k_norm = k.norm(dim=-2, keepdim=True)
+        q = q ** 3
+        k = k ** 3
+        q = (q / q.norm(dim=-2, keepdim=True)) * q_norm
+        k = (k / k.norm(dim=-2, keepdim=True)) * k_norm
+        trans_k = k.transpose(-1, -2)
+        v = F.pad(v, (0, 1), mode="constant", value=1)
+        kv = torch.matmul(trans_k, v)
+        out = torch.matmul(q, kv)
+        out = out[..., :-1] / (out[..., -1:] + self.eps)
+        out = torch.transpose(out, -1, -2)
+        out = torch.reshape(out, (B, -1, H, W))
+        # #特征融合代码
+        bn,cn,hn,wn = out.shape 
+        pooled_sample = self.global_pool(sampled_result).view(bn, cn)
+        pooled_focus = self.global_pool(out).view(bn, cn)
+        pooled_dwc = self.global_pool(add_featuremap).view(bn, cn)
+        weights1 = self.sigmoid(self.weight_generator(pooled_sample))
+        weights2 = self.sigmoid(self.weight_generator(pooled_focus))
+        weights3 = self.sigmoid(self.weight_generator(pooled_dwc))
+        out = sampled_result * weights1[:,0].view(bn,1,1,1) + out * weights2[:,1].view(bn,1,1,1) + add_featuremap * weights3[:,2].view(bn,1,1,1)
         return out
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # # generate multi-scale q, k, v
+        result_conv = self.conv3x3(x)
+        result_conv = self.conv5x5(result_conv)
+        ca = self.channel_attention(result_conv)
+        result_conv = result_conv * ca
+        bo, co, _, _ = x.shape
+        pooled_channel_attention = self.global_pool(result_conv).view(bo,co)
+        weights_ca = self.sigmoid(self.weight_generator_outuse(pooled_channel_attention))
         qkv = self.qkv(x)
         multi_scale_qkv = [qkv]
         for op in self.aggreg:
             multi_scale_qkv.append(op(qkv))
         multi_scale_qkv = torch.cat(multi_scale_qkv, dim=1)
         out = self.relu_linear_att(multi_scale_qkv)
-        out = self.proj(out)
+        out = self.proj(out) + result_conv * weights_ca.view(bo, 1, 1, 1)
         return out
 
     @staticmethod

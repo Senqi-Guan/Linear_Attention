@@ -73,14 +73,6 @@ class ClsTrainer(Trainer):
                     )
                     t.update()
 
-        if val_top1.avg > 79.08:#去掉dwc
-            try:
-                torch.save(model.state_dict(), '/home/gsq/code/gcode/线性注意力/linear-paper/efficientvit-master-1-improvement/.exp/cls/imagenet/m3_r224_final_without_dwc/final.pt')
-                print("Model saved as final.pt")
-                sys.exit(0)  # 终止程序运行，返回状态码 0 表示正常退出
-            except Exception as e:
-                print(f"Error saving model: {e}")
-
         return {
             "val_top1": val_top1.avg,
             "val_loss": val_loss.avg,
@@ -213,17 +205,6 @@ class ClsTrainer(Trainer):
             avg_top1 = list_mean([info_dict["val_top1"] for info_dict in val_info_dict.values()])
             is_best = avg_top1 > self.best_val
             self.best_val = max(avg_top1, self.best_val)
-
-            # if avg_top1 > target_value:
-            #     self.write_log(f"Training stopped at epoch {epoch} because avg_top1 ({avg_top1:.2f}) > {target_value}.")
-            #     current_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-            #     self.write_log(f"Current_time:{current_time}")
-            #     self.save_model(
-            #         only_state_dict=False,
-            #         epoch=epoch,
-            #         model_name="model_best.pt" if is_best else "checkpoint.pt",
-            #     )
-            #     break
 
             if self.auto_restart_thresh is not None:
                 if self.best_val - avg_top1 > self.auto_restart_thresh:

@@ -1,7 +1,6 @@
 data_provider:
   dataset: imagenet
-  # data_dir: /dataset/imagenet
-  data_dir: /home/gsq/code/gcode/imageNet-1K
+  data_dir: /dataset/imagenet
   rrc_config:
     train_interpolate: random
     test_interpolate: bicubic
